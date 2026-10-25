@@ -1,0 +1,184 @@
+x-airflow-common: &airflow-common
+  build: .
+  env_file:
+    - ${ENV_FILE_PATH:-.env}
+  environment: &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__CORE__AUTH_MANAGER: airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-postgres:5432/airflow
+    AIRFLOW__CORE__FERNET_KEY: ${FERNET_KEY:-}
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-apiserver:8080/execution/
+    AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW__API_AUTH__JWT_SECRET:-change_me_to_a_long_random_secret}
+    AIRFLOW__API_AUTH__JWT_ISSUER: ${AIRFLOW__API_AUTH__JWT_ISSUER:-airflow}
+    AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: "true"
+    _PIP_ADDITIONAL_REQUIREMENTS: ${_PIP_ADDITIONAL_REQUIREMENTS:-}
+    AIRFLOW_CONFIG: /opt/airflow/config/airflow.cfg
+    GOOGLE_APPLICATION_CREDENTIALS: /opt/airflow/credentials/application_default_credentials.json
+    GOOGLE_CLOUD_PROJECT: ${GCP_PROJECT_ID}
+    GROCERY_POSTGRES_HOST: grocery-postgres
+    GROCERY_POSTGRES_PORT: "5432"
+  volumes:
+    - ${AIRFLOW_PROJ_DIR:-.}/dags:/opt/airflow/dags
+    - ${AIRFLOW_PROJ_DIR:-.}/logs:/opt/airflow/logs
+    - ${AIRFLOW_PROJ_DIR:-.}/config:/opt/airflow/config
+    - ${AIRFLOW_PROJ_DIR:-.}/plugins:/opt/airflow/plugins
+    - ${AIRFLOW_PROJ_DIR:-.}/scripts:/opt/airflow/scripts/
+    - ${CREDENTIAL_GOOGLE_PATH}:/opt/airflow/credentials/application_default_credentials.json:ro
+  user: "${AIRFLOW_UID:-50000}:0"
+  depends_on: &airflow-common-depends-on
+    airflow-postgres:
+      condition: service_healthy
+
+services:
+  airflow-postgres:
+    image: postgres:16
+    container_name: airflow-postgres-grocery
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - airflow-postgres-data:/var/lib/postgresql/data
+    ports:
+      - "6401:5432"
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow", "-d", "airflow"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: always
+    env_file:
+      - .env
+
+  grocery-postgres:
+    image: postgres:16
+    container_name: grocery-postgres
+    environment:
+      POSTGRES_USER: ${GROCERY_POSTGRES_USER}
+      POSTGRES_PASSWORD: ${GROCERY_POSTGRES_PASSWORD}
+      POSTGRES_DB: ${GROCERY_POSTGRES_DB}
+    volumes:
+      - grocery-postgres-data:/var/lib/postgresql/data
+    ports:
+      - "6402:5432"
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow", "-d", "grocery"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: always
+    env_file:
+      - .env
+
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: grocery-pgadmin
+    depends_on:
+      airflow-postgres:
+        condition: service_healthy
+      grocery-postgres:
+        condition: service_healthy
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL:-admin@admin.com}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD:-change_me}
+      PGADMIN_CONFIG_SERVER_MODE: "True"
+      PGADMIN_CONFIG_MASTER_PASSWORD_REQUIRED: "False"
+    ports:
+      - "6403:80"
+    volumes:
+      - pgadmin-data:/var/lib/pgadmin
+    restart: unless-stopped
+    env_file:
+      - .env
+
+  airflow-apiserver:
+    <<: *airflow-common
+    command: api-server
+    ports:
+      - "6406:8080"
+    healthcheck:
+      test:
+        - CMD
+        - curl
+        - --fail
+        - http://localhost:8080/api/v2/monitor/health
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+    restart: always
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - 'airflow jobs check --job-type SchedulerJob --hostname "$${HOSTNAME}"'
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+    restart: always
+
+  airflow-dag-processor:
+    <<: *airflow-common
+    command: dag-processor
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+    restart: always
+
+  airflow-triggerer:
+    <<: *airflow-common
+    command: triggerer
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - 'airflow jobs check --job-type TriggererJob --hostname "$${HOSTNAME}"'
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+    restart: always
+
+  airflow-init:
+    <<: *airflow-common
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        airflow db migrate
+        airflow users create \
+          --username "$AIRFLOW_ADMIN_USERNAME" \
+          --firstname Airflow \
+          --lastname Admin \
+          --role Admin \
+          --email "$AIRFLOW_ADMIN_EMAIL" \
+          --password "$AIRFLOW_ADMIN_PASSWORD" || true
+    environment:
+      <<: *airflow-common-env
+      AIRFLOW_ADMIN_USERNAME: ${AIRFLOW_ADMIN_USERNAME:-admin}
+      AIRFLOW_ADMIN_EMAIL: ${AIRFLOW_ADMIN_EMAIL:-admin@example.com}
+      AIRFLOW_ADMIN_PASSWORD: ${AIRFLOW_ADMIN_PASSWORD:?Set AIRFLOW_ADMIN_PASSWORD in .env}
+      _PIP_ADDITIONAL_REQUIREMENTS: ""
+    restart: "no"
+volumes:
+  airflow-postgres-data:
+  grocery-postgres-data:
+  pgadmin-data:

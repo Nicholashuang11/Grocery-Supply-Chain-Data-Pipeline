@@ -1,0 +1,6 @@
+apache-airflow-providers-standard
+google-cloud-bigquery
+python-dotenv
+pandas
+SQLAlchemy
+psycopg[binary]
