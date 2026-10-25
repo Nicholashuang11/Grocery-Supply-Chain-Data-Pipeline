@@ -30,6 +30,18 @@ This project uses the **Inventory & Supply Chain Dataset v1.0.0**, a determinist
 | `purchase_order_lines` | 53,967 |
 | `inventory_movements` | 138,436 |
 
+## How the Bronze Loader Works
+
+For each table, `insert_data_bronze_bq.py`:
+
+1. Reads the BigQuery table schema and queries Postgres (full table, or only rows for the given date).
+2. **Schema drift check:** fails if columns differ between source and BigQuery (ignoring metadata columns).
+3. Adds audit columns: `run_id`, `batch_date`, `ingested_at`.
+4. Casts the DataFrame to the BigQuery types (`STRING`, `INT64`, `NUMERIC`, `DATE`, `TIMESTAMP`).
+5. Loads into the target **partition** with `WRITE_TRUNCATE`, so re-running the same date is **idempotent**.
+6. **Reconciliation check:** compares the source row count to the row count in BigQuery for that `batch_date` and fails on mismatch.
+
+If the source returns zero rows for a date, the corresponding partition is cleared and verified as empty.
 ## Data Model
 
 Seven tables, defined in `createtable.sql` (Postgres) and `bqcreatetablebronze.sql` (BigQuery):
@@ -62,15 +74,3 @@ Seven tables, defined in `createtable.sql` (Postgres) and `bqcreatetablebronze.s
 └── insert_data_bronze_bq.py      # Postgres → BigQuery bronze loader
 ```
 
-## How the Bronze Loader Works
-
-For each table, `insert_data_bronze_bq.py`:
-
-1. Reads the BigQuery table schema and queries Postgres (full table, or only rows for the given date).
-2. **Schema drift check:** fails if columns differ between source and BigQuery (ignoring metadata columns).
-3. Adds audit columns: `run_id`, `batch_date`, `ingested_at`.
-4. Casts the DataFrame to the BigQuery types (`STRING`, `INT64`, `NUMERIC`, `DATE`, `TIMESTAMP`).
-5. Loads into the target **partition** with `WRITE_TRUNCATE`, so re-running the same date is **idempotent**.
-6. **Reconciliation check:** compares the source row count to the row count in BigQuery for that `batch_date` and fails on mismatch.
-
-If the source returns zero rows for a date, the corresponding partition is cleared and verified as empty.
